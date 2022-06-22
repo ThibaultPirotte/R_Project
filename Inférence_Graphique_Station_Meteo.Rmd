@@ -1,0 +1,252 @@
+---
+title: "Inférence d'un réseau entre stations météorologigues"
+author: "Thibault Pirotte"
+date: "Année 2021-2022"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    number_sections: yes
+fontsize: 11pt
+---
+
+
+\newtheorem{question}{Question}
+\newtheorem{definition}{Definition}
+
+\newcommand{\Var}{\mbox{Var}}
+\newcommand{\Cov}{\mbox{Cov}}
+
+\section*{Préambule}
+
+Dans ce projet, il est proposé d'analyser un jeu de données issues de mesures prises en différentes stations météorologiques durant l'année 2016 dans le nord-ouest de la France. Le but du projet est l'inférence d'un graphe de corrélation partielle entre certaines variables météorologiques à l'aide des outils d'estimation en grande dimension dans des modèles graphiques.
+
+#### Données disponibles sur les stations de mesure
+
+Sur l'année 2016, on observe des données d'apprentissage sur $p = 262$ stations météorologiques dont on dispose des coordonnées spatiales (latitude et longitude).
+
+Pour chaque station $1 \leq i \leq p$, on dispose des mesures suivantes :
+
+**Variables explicatives** : mesure de $q = 6$ variables $X_{ijt} = (X_{ijt}^{(k)})_{1 \leq k \leq q} \in \mathbb{R}^{q}$ pour la station $i$, le jour $j$  et l'heure $t \in \{0,\ldots,23 \}$ (variable ordonnée). Les mesures sont
+
+- 'ff' : La force du vent
+- 't' : La température (Kelvin)
+- 'td' : La température ressentie (Kelvin)
+- 'hu' : Le taux d'humidité
+- 'dd' : La direction du vent (en degrés)
+- 'precip' : Le cumul de pluie sur une heure en ml
+
+
+\section{Choix de la variable et pré-traitement des données}
+
+J'ai décidé d'utiliser ici la moyenne journalière de la variable Température. En effet, cette variable peut facilement être modélisé
+par une gaussienne.Il faut donc dans un premier temps transformé la matrice X_2016 de manière a ne garder que le jour, le numéro de la station et la moyenne de la température.
+```{r}
+X_2016 = read.csv("X_2016_final.csv")
+data <- cbind(X_2016[,145:146],rowMeans(X_2016[,25:48]))
+colnames(data) <- c("number_sta", "day", "T moyenne")
+head(data)
+```
+
+Il nous faut maintenant réorganiser ce dataset de manière à avoir les jours en ligne et les stations en colonnes, et juste la 
+température moyenne dans la matrice.
+
+
+```{r}
+
+all_stations <- unique(data[,1])
+X <- matrix(NA, nrow = 366, ncol = 262) #On construit la matrice X à inferer
+for(i in 1:92209){
+  t = data[i,3]
+  j = data[i,2] + 1
+  s = match(data[i,1], all_stations)
+  X[j,s] <- t
+}
+colnames(X) <- all_stations
+sum(is.na(X))
+```
+On peut constater un nombre assez important de NA dans la matrice que l'on a construit. J'ai choisi de traiter ces valeurs manquantes de manière assez drastique en supprimant toutes les stations pour lesquelles le taux de NA est supérieux à 1%. Les quelques valeurs manquantes sont remplacés par la moyenne de la colonnes correspondantes (la température moyenne annuelle de la station)
+
+
+```{r}
+X = X[,colSums(is.na(X)) < nrow(X)*0.01]
+library(zoo)
+X <- na.aggregate(X)
+```
+
+L'intérêt ici est que les valeurs manquantes peuvent éventuellement modifier les corrélations de la matrice, par conséquent on réduit
+ici au maximum ce risque. L'autre intêret est qu'en réduisant le nombre de station, le résultat sera plus lisible.
+
+```{r}
+n = 366         #Nombre de jours
+p = ncol(X)     #Nombre de stations que l'on étudie
+p
+```
+
+\section{Recherche de corrélation significative}
+
+Pour étudier les corrélations significatives, on va regarder les p-values associées aux covariances des stations de X.
+Pour cela, il faut d'abord calculer la matrice de covariance et la matrice de précision associée.
+```{r}
+X_cov <- cov(X)  #Matrice de covariance, si on a toujours des NA, il faut utiliser l'argument use = "pairwise.complete"
+                 #Attention néanmoins, dans ce cas la matrice n'est pas spécialement inversible
+K_hat <- solve(X_cov) #Matrice de préicision, qui est l'inverse de la matrice de covariance
+
+```
+On peut maintenant calculer la matrice des p-values:
+
+
+```{r}
+K_hat <- (t(K_hat)+K_hat)/2
+rho_hat <- matrix(0,p,p)
+
+for (i in 1:p){
+  for (j in 1:p){
+    rho_hat[i,j] <- -K_hat[i,j]/sqrt(K_hat[i,i]*K_hat[j,j])
+  }
+}
+
+t_hat <- sqrt(n-p-2)*rho_hat/sqrt(1-rho_hat^2) # matrice des stats de test
+p_hat <- 2*(1-pt(abs(t_hat),n-p-2))  #Matrice des p_value
+```
+
+Pour établir si une corrélation est significative ou pas, on peut regarder la p-value correspondante.
+Si celle-ci est inférieure à un certain seuil (par exemple 0.05), alors on estime la corrélation significative.
+Néanmoins, dans le cas ou on a des données fortemenet corrélées, comme ici, le nombre de corrélations trouvées peut être
+très important.
+Pour corriger cela, on peut utiliser l'ajustement de Bonferroni, c'est à dire diviser le seuil par le nombre de tests effectuées.
+
+```{r}
+alpha = 0.05 #seuil
+m = (p*p - p)/2 #nombre de tests, p*p est la taille de la matrice. On enlève la diagonale (qui correspond a la corrélation entre une
+                #station et elle même) et on divise par 2 car la matrice est symmétrique
+alpha = alpha/m
+alpha
+```
+Avec le seuil obtenu, on peut calculer la matrice d'adjacence:
+```{r}
+A <- matrix(0,p,p)                             # matrice d'adjacence
+A[p_hat<alpha]=1
+diag(A) <- 0
+colnames(A) <- rownames(A) <- colnames(X)
+```
+
+
+Le code suivant va nous permettre de visualiser le graphe obtenu sur une carte.
+```{r}
+library(readr)
+stations_coordinates_all <- read_csv("stations_coordinates.csv")
+pos = is.element(stations_coordinates_all$number_sta, colnames(A))
+stations_coordinates = stations_coordinates_all[pos,] 
+
+#ATTENTION, les stations doivent être ordonnées dans le même ordre dans stations_coordinates et dans la matrice d'adjacence
+stations_coordinates <- stations_coordinates[order(stations_coordinates$number_sta),] 
+
+library(leaflet)
+library(igraph)
+
+g <- graph_from_adjacency_matrix(A, weighted = TRUE) %>%
+  set_vertex_attr("longitude", value = as.matrix(stations_coordinates["lon"])) %>%
+  set_vertex_attr("latitude", value = as.matrix(stations_coordinates["lat"]))
+gg <- get.data.frame(g, "both")
+
+vert <- gg$vertices
+rownames(vert) <- vert$name
+
+library(sp)
+coordinates(vert) <- ~longitude+latitude
+
+line <- function(i){
+  return(as(rbind(vert[vert$name == gg$edges[i, "from"], ], 
+                  vert[vert$name == gg$edges[i, "to"], ]), "SpatialLines")) # arrets
+}
+
+edges <- lapply(1:nrow(gg$edges), line)
+for (i in seq_along(edges)) {
+  edges[[i]] <- spChFIDs(edges[[i]], as.character(i))
+}
+edges <- do.call(rbind, edges)
+
+noloop <- gg$edges$from != gg$edges$to
+
+N <- dim(A)[1]
+leaflet(vert[1:N,]) %>% addTiles() %>% 
+  addCircleMarkers(data = vert[1:N,])%>% 
+  addPolylines(data = edges[1:nrow(gg$edges),radius=0.05], 
+               weight = 5*gg$edges$weight)
+
+
+
+```
+On voit que les corrélations significatives trouvées respectent la géographie, à de rares exceptions près.
+
+
+\section{Autres méthodes}
+
+Si on peut voir que dans notre cas la méthode de Bonferroni semble efficace avec probablement très peu de faux positifs, il faut faire attention au fait qu'elle est plutôt conservative, ce qui fait qu'on peut trouver trop peu de corrélations (notamment dans le cas ou le nombre de variables est très grand).
+
+Pour éviter cela, on peut utiliser la procédure de contrôle des faux positifs de Benjamini-Hochberg, qui permet de trouver plus de corrélations significatives tout en gardant un nombre de faux positifs relativement bas.
+
+
+```{r}
+p_value <- sort(p_hat)          # On trie les p-valeurs par ordre croissant
+b_h_method <- seq(1:p*p)*alpha
+
+# On va chercher le plus grand k tel que p_value[k] < b_h_method[k]
+test <- p_value < b_h_method #on fait le test pour toutes les p_valeurs
+k <- (sum(test) - p)/2   #On prend le dernier index qui vaut TRUE. On peut retirer les p premiers (car correspondant a la diagonale avec la p-value = 0). De plus, comme la matrice des p-value est symmétrique, celle-ci sont toutes dédoublées. On peut donc diviser k par 2
+alpha2 <- k * alpha #Nouvelles valeurs de alpha
+
+```
+
+On peut maintenant calculer de la même manière la matrice d'adjacence.
+
+```{r}
+A2 <- matrix(0,p,p)                             # matrice d'adjacence
+A2[p_hat<alpha2]=1
+diag(A2) <- 0
+colnames(A2) <- rownames(A2) <- colnames(X)
+
+```
+
+Et maintenant, regardons le résultat:
+
+```{r}
+g <- graph_from_adjacency_matrix(A2, weighted = TRUE) %>%
+  set_vertex_attr("longitude", value = as.matrix(stations_coordinates["lon"])) %>%
+  set_vertex_attr("latitude", value = as.matrix(stations_coordinates["lat"]))
+gg <- get.data.frame(g, "both")
+
+vert <- gg$vertices
+rownames(vert) <- vert$name
+
+library(sp)
+coordinates(vert) <- ~longitude+latitude
+
+line <- function(i){
+  return(as(rbind(vert[vert$name == gg$edges[i, "from"], ], 
+                  vert[vert$name == gg$edges[i, "to"], ]), "SpatialLines")) # arrets
+}
+
+edges <- lapply(1:nrow(gg$edges), line)
+for (i in seq_along(edges)) {
+  edges[[i]] <- spChFIDs(edges[[i]], as.character(i))
+}
+edges <- do.call(rbind, edges)
+
+noloop <- gg$edges$from != gg$edges$to
+
+N <- dim(A)[1]
+leaflet(vert[1:N,]) %>% addTiles() %>% 
+  addCircleMarkers(data = vert[1:N,])%>% 
+  addPolylines(data = edges[1:nrow(gg$edges),radius=0.05], 
+               weight = 5*gg$edges$weight)
+```
+On trouve en effet de nouvelles corrélations, dont quelques unes semblent surprenantes. Malgré cela, la cohérence géographique semble de manière générale plutôt respectée.
+
+Une autre méthode qu'on aurait pu utiliser est le GLASSO.
+
+
+
+
+
